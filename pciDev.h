@@ -23,6 +23,8 @@
 #include <asm/io.h>
 #include <linux/vmalloc.h>
 #include <linux/dma-mapping.h>
+#include <linux/delay.h>
+#include <linux/interrupt.h>
 
 #include "ledTimer.h"
 
@@ -36,11 +38,15 @@
 #define KZALLOC_ARRAY(type, num, flag)                                         \
     ((type*)kzalloc(sizeof(type)*(num), flag))
 
+/* descriptor count and size */
+#define DESC_CNT    16                /* num of desc in ring */
+#define DBUF_SIZE   (sizeof(u8)*2048) /* 2k bytes */
+
                     /* register definitions */
 #define HWREG(bar, offset) ((bar)+(offset))
 
 /* LED ctrl offset */
-#define LED_OFFSET 0xE00
+#define LED_OFFSET 0xE00 /* LED control register */
 /* led numbers */
 #define RIGHT_GRN 0x1 /* right green is LED0 */
 #define LEFT_GRN  0x2 /* left green is LED1 */
@@ -53,18 +59,37 @@
 
 /* device Control Register */
 #define DEVCTL_OFFSET 0x0   
-#define SWRST_BIT     0x4000000 /* software reset bit in */
+#define PHY_RST_BIT   0x80000000 /* PHY_RST bit */
+#define MAC_RST_BIT   0x4000000  /* RST bit */
+
+/* Medium Dependant Interface Port Register */
+#define MDIC_OFFSET 0x20 /* MDI control register */
+#define PHY_INIT    0x1831AF08 /* needed for a forced PHY setup */
+/* TODO: I want more information about what this INIT is doing and how to do it
+ *       without hand holding */
+
+/* 3GIO control registers */
+#define GCR_OFFSET  0x5B00
+#define GCR_INIT    0x400000 /* required bit to set during initialization */
+#define GCR2_OFFSET 0x5B64
+#define GCR2_INIT   0x1      /* required bit to set during initalization */
 
 /* interrupt regs */
-#define ICR_OFFSET 0xC0       /* Interrupt Cause Read */
-#define ICS_OFFSET 0xC8       /* Interrupt Cause Set  */
-#define IMS_OFFSET 0xD0       /* Interrupt Mask Set/Read */
-#define LSC        0x2        /* Link Status Change bit 2 */
-#define RXQ0       0x100000   /* Receive Queue 0 interrupt bit 20 */
+#define ICR_OFFSET   0xC0       /* Interrupt Cause Read */
+#define ICS_OFFSET   0xC8       /* Interrupt Cause Set  */
+#define IMS_OFFSET   0xD0       /* Interrupt Mask Set/Read */
+#define IMC_OFFSET   0xD8       /* Interrupt Mask Clear Regiser */
+#define LSC          0x2        /* Link Status Change bit 2 */
+#define RXQ0         0x100000   /* Receive Queue 0 interrupt bit 20 */
+#define DISABLE_INTS 0xFFFFFFFF /* Mask for IMC to disable all interrupts */
 
 /* Receive Control Register offset */
 #define RXCTL_OFFSET 0x100 
-#define REC_EN       0x2 /* RCTL enable bit */
+#define RX_EN       0x2    /* RCTL enable bit */
+#define RX_UNI_P    0x8    /* unicast promiscuous bit */
+#define RX_MULTI_P  0x10   /* multicast promiscuous bit */
+#define RX_BAM      0x8000 /* Breadcast Accept mode bit */
+#define RXCTL_INIT (RX_EN | RX_UNI_P | RX_BAM | RX_MULTI_P)
 
 /* Receive Descriptor control */
 #define RXDCTL_OFFSET 0x2828
@@ -72,19 +97,21 @@
 #define RXD_WTHRESH_MASK(toSet) ((toSet)<<(WTHRESH_SHIFT))
 #define RXD_GRAIN 0x1000000     /* descriptor grainulatiry bit 24 */
 
-/* Recieve descriptor length reg */
+/* Receive descriptor length reg */
 #define RDLEN_OFFSET 0x2808
+#define RDL_LEN (sizeof(struct gbe38v_rx_desc)*DESC_CNT)
 #define RDL_SHIFT 7
 #define RDL_SET(toSet) ((toSet)<<(RDL_SHIFT))
 
-/* Recieve Descriptor Bar, Must be 16byte aligned */
-#define RDBAL_OFFSET 0x2800 /* Base Address Low bits */
+/* Receive Descriptor Bar, Must be 16byte aligned */
 #define RDBAH_OFFSET 0x2804 /* Base Address High bits */
+#define RDBAL_OFFSET 0x2800 /* Base Address Low bits */
 
 /* Head and Tail of Rx descriptor ring */
 #define RX_HEAD_OFFSET 0x2818
+#define HEAD_INIT      0x0
 #define RX_TAIL_OFFSET 0x2810
-
+#define TAIL_INIT      16
                     /* general definitions */
 #define SUCCESS 0
 #define FAILURE -1
@@ -102,11 +129,11 @@
 /* gets the descriptor from void *desc. 
  * Ring, Desc num, struct type */
 #define GBE38V_DESC_BUFF(R, i, type)                                           \
-    (((struct (type)*)((R)->descBuff)) + (i))
+    (((struct type *)((R)->descBuff)) + (i))
+#define GBE38V_DESC_RING(R, i, type)                                           \
+    (((struct type *)((R)->desc)) + (i))
 
 #define ONE_PAGE    4096              /* Page size of system */
-#define DESC_CNT    16                /* num of desc in ring */
-#define DBUF_SIZE   (sizeof(u8)*2048) /* 2k bytes */
 
 #define WQ_SLEEP    500 /* miliseconds, 0.5seconds */
 

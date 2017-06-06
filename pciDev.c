@@ -24,18 +24,45 @@ static struct file_operations fops = {
 };
 
 /*******************************************************************************
+ *                      led functionality
+ ******************************************************************************/
+static int set_led(void __iomem *ledReg, int ledNums, bool setTo)
+{
+    u32 toWrite;
+    u32 setMode = (setTo == HIGH ? LED_ON : LED_OFF);
+
+    toWrite = ioread32(ledReg);
+
+    if(ledNums & RIGHT_GRN){
+        toWrite &= ~(CLEAR_MASK << RIGHT_GRN_SHIFT); /* clear mode bits */
+        toWrite |= setMode << RIGHT_GRN_SHIFT;
+    }
+    else if(ledNums & LEFT_GRN){
+        toWrite &= ~(CLEAR_MASK << LEFT_GRN_SHIFT); /* clear mode bits */
+        toWrite |= setMode << LEFT_GRN_SHIFT;
+    }
+    else{ /* amber LED not in use */
+        /* TODO: print warning */
+        return -EINVAL;
+    }
+    
+    iowrite32(toWrite, ledReg);
+    return SUCCESS;
+}/* end set_led */
+
+/*******************************************************************************
  *                          head/tail Managment
  ******************************************************************************/
 static int gbe3v_rx_update_tail(struct gbe38v_ring *rxRing)
 {
     u16 useNext = rxRing->useNext;
-    iowrite(useNext, rxRing->tail);
+    iowrite32(useNext, rxRing->tail);
     /* TODO: make error checking here to ensure the tail pointer
      * is proper after write before continueing */
     
 
-/* TODO: make it add and error check a num to send so we can
- *       later make it send and clean more than 1 desc at a time */
+    /* TODO: make it add and error check a desc "send num" to send so we can
+     *       later make it send and clean more than 1 desc at a time */
     ++useNext; 
     (useNext < rxRing->count) ? (++rxRing->useNext) : (rxRing->useNext = 0);
 
@@ -61,7 +88,7 @@ static int gbe38v_rx_clean_desc(struct gbe38v_ring *rxRing)
      *       Implemented this as function for furutre additions,
      *       Also note in update rx about pinning and unpinning the descriptors
      *       on clean and tail bump */
-    toClean->upper.status = 0; /* Reset status field */ 
+    toClean->upper.fields.status = 0; /* Reset status field */ 
     
     return SUCCESS;
 }
@@ -69,7 +96,7 @@ static int gbe38v_rx_clean_desc(struct gbe38v_ring *rxRing)
 /*******************************************************************************
  *                          Workqueue
  ******************************************************************************/
-static void* rx_wq_task(struct work_struct *work)
+static void rx_wq_task(struct work_struct *work)
 {
     struct gbe38v_dev  *myDev  = container_of(work, struct gbe38v_dev, workq);
     struct gbe38v_ring *rxRing = myDev->rxRing;
@@ -86,45 +113,15 @@ static void* rx_wq_task(struct work_struct *work)
     /* bump tail */
     gbe3v_rx_update_tail(rxRing);
     gbe38v_rx_clean_desc(rxRing);
-
-    
-    
 }
-
-/*******************************************************************************
- *                      led functionality
- ******************************************************************************/
-void set_led(void __iomem *ledReg, int ledNums, bool setTo)
-{
-    u32 toWrite;
-    u32 setMode = (setTo == HIGH ? LED_ON : LED_OFF);
-
-    toWrite = ioread32(ledReg);
-
-    if(ledNums & RIGHT_GRN){
-        toWrite &= ~(CLEAR_MASK << RIGHT_GRN_SHIFT); /* clear mode bits */
-        toWrite |= setMode << RIGHT_GRN_SHIFT;
-    }
-    else if(ledNums & LEFT_GRN){
-        toWrite &= ~(CLEAR_MASK << LEFT_GRN_SHIFT); /* clear mode bits */
-        toWrite |= setMode << LEFT_GRN_SHIFT;
-    }
-    else{ /* amber LED not in use */
-        /* TODO: print warning */
-        return -ENOMEM;
-    }
-    
-    iowrite32(toWrite, ledReg);
-}/* end set_led */
 
 /*******************************************************************************
  *                          irq interrupts
  ******************************************************************************/
-static irqreturn_t gbe38v_rx_handle(int irq, void *dev_id, 
-                                       struct pt_regs *regs)
+static irqreturn_t gbe38v_rx_handle(int irq, void *dev_id)
 {
     struct gbe38v_dev *myDev = dev_id;
-    void __iomem *ledReg = (myDev->hwAddr)+LED_REG;
+    void __iomem *ledReg = (myDev->hwAddr)+LED_OFFSET;
 
     /* read cause of IRQ and make sure it is for us */
     /* TODO: tune the interupts we check and fire. No different action so far
@@ -147,7 +144,7 @@ static irqreturn_t gbe38v_rx_handle(int irq, void *dev_id,
 
 static int gbe38v_setup_interrupts(struct gbe38v_dev *myDev)
 {
-    struct pci_dev pdev = myDev->pdev;
+    struct pci_dev *pdev = myDev->pdev;
     void __iomem *maskReg = HWREG(myDev->hwAddr, IMS_OFFSET);
 
     /* enable LSC and RXQ0 interrupts */
@@ -164,8 +161,9 @@ static int gbe38v_setup_interrupts(struct gbe38v_dev *myDev)
  ******************************************************************************/
 static int gbe38v_rx_alloc_dma(struct gbe38v_dev *myDev)
 {
-    myDev->rxRing = dma_alloc_coherent(&myDev->pdev->dev, sizeof(struct gbe38v),
-                                       &myDev->dma, GFP_KERNEL);
+    myDev->rxRing = dma_alloc_coherent(&myDev->pdev->dev, 
+                                       sizeof(struct gbe38v_ring),
+                                       &myDev->rxdma, GFP_KERNEL);
     if(!myDev->rxRing)
         return -ENOMEM;
 
@@ -188,16 +186,17 @@ static int gbe38v_alloc_dma_ring(struct pci_dev *pdev, struct gbe38v_ring *ring)
 
 static int gbe38v_setup_rx_resources(struct gbe38v_ring *rxRing)
 {
-    int i;
+    int i = 0;
     int err;
     void **descBuff = rxRing->descBuff; /* descBuff allocated as *descBuff[] */
     struct gbe38v_buffer *bufferInfo; 
     struct pci_dev *pdev = rxRing->myDev->pdev;
+    struct gbe38v_rx_desc *descRing; 
+    descRing = GBE38V_DESC_RING(rxRing, 0, gbe38v_rx_desc); /* ptr of first i */
 
     rxRing->size = sizeof(struct gbe38v_rx_desc)*rxRing->count;
 	rxRing->size = ALIGN(rxRing->size, ONE_PAGE);
     
-
     /* allocate descriptors */
 	err = gbe38v_alloc_dma_ring(pdev, rxRing);
 	if(err)
@@ -221,9 +220,8 @@ static int gbe38v_setup_rx_resources(struct gbe38v_ring *rxRing)
             goto alloc_fail;
         }
 
-        BUG_ON(!rxRing->descBuff[i]);
 
-        bufferInfo[i].descAddr = descBuff[i];
+        bufferInfo[i].desc = descBuff[i];
         bufferInfo[i].size = DBUF_SIZE;
         bufferInfo[i].dma = dma_map_single(&pdev->dev, descBuff[i], DBUF_SIZE, 
                                             DMA_BIDIRECTIONAL);
@@ -231,7 +229,16 @@ static int gbe38v_setup_rx_resources(struct gbe38v_ring *rxRing)
             printk(KERN_ERR DEV_NAME ": Failed to DMA buffer address %d\n",i);
             goto alloc_fail;
         }
+
+        /* Fill descriptor addresses */
+        descRing[i].bufferAddr = cpu_to_le64(bufferInfo[i].dma);
+        descRing[i].lower.flags.length = cpu_to_le16(DBUF_SIZE);
+        descRing[i].lower.flags.checkSum = 0; /* TODO: checksum stuff */
+        descRing[i].upper.data = 0;
     }
+    
+    rxRing->head = HWREG(rxRing->myDev->hwAddr, RX_HEAD_OFFSET);
+    rxRing->tail = HWREG(rxRing->myDev->hwAddr, RX_TAIL_OFFSET);
 
     return SUCCESS;
 
@@ -249,7 +256,7 @@ dma_ring_fail:
     return err;
 }
 
-static int gbe38v_setup_dma(struct gbe38_dev *myDev)
+static int gbe38v_setup_dma(struct gbe38v_dev *myDev)
 {
     int err;
     err = gbe38v_rx_alloc_dma(myDev); /* allocate rxRing */
@@ -257,7 +264,7 @@ static int gbe38v_setup_dma(struct gbe38_dev *myDev)
         return err;
 
     /* initalize dma ring resources */
-    err = gbe38v_setup_rx_resources(myDev->rxRing) 
+    err = gbe38v_setup_rx_resources(myDev->rxRing);
     if(err)
         return err;
 
@@ -267,7 +274,37 @@ static int gbe38v_setup_dma(struct gbe38_dev *myDev)
 /*******************************************************************************
  *                      pci device functions
  ******************************************************************************/
-static int init_device_reg(struct gbe38v_dev *myDev)
+
+static void gbe38v_init_rx_reg(struct gbe38v_dev *myDev)
+{
+    struct gbe38v_ring *rxRing = myDev->rxRing;
+    void __iomem *hwAddr = myDev->hwAddr;
+    void __iomem *workReg;
+    u32 toWrite;
+
+    /* set high and low addr of Rx descriptor ring */
+    workReg = HWREG(hwAddr, RDBAH_OFFSET);
+    toWrite = (rxRing->dma >> 32) & 0xFFFFFFFF; /* high 32 bits */
+    iowrite32(toWrite, workReg);
+
+    workReg = HWREG(hwAddr, RDBAL_OFFSET);
+    toWrite = rxRing->dma & 0xFFFFFFFF; /* low 32 bits */
+    iowrite32(toWrite, workReg);
+
+    /* set Rx decriptor ring length */
+    workReg = HWREG(hwAddr, RDLEN_OFFSET);
+    toWrite = RDL_SET(RDL_LEN);
+
+    /* set Rx head */
+    workReg = HWREG(hwAddr, RX_HEAD_OFFSET);
+    iowrite32(HEAD_INIT, workReg);
+
+    /* set Rx tail "one descriptor beyone the end" */
+    workReg = HWREG(hwAddr, RX_TAIL_OFFSET);
+    iowrite32(TAIL_INIT, workReg);
+}
+
+static void init_device_reg(struct gbe38v_dev *myDev)
 {
     /* NOTE: RXDCTL.WTHRESH have been used, they are written
      *       back, regardless of cahche line allignment. It is
@@ -275,17 +312,58 @@ static int init_device_reg(struct gbe38v_dev *myDev)
      *       size. Currently only operating on 1 desc at a time. 
      *       RXDCTL.GRAIN = 0 by default, cahche line grainularity.
      *TODO:? Might need to = 1 for descriptor grainulatiry of WTHRESH */
-
+     void __iomem *hwAddr = myDev->hwAddr;
+     void __iomem *workReg;
+     u32 toWrite;
     
+    workReg = HWREG(hwAddr, DEVCTL_OFFSET);
+    /* PHY reset, effects load NVM and datapath */
+    toWrite = ioread32(workReg) | PHY_RST_BIT;
+    iowrite32(toWrite, workReg);
+    while((ioread32(workReg) & PHY_RST_BIT) != 0);
 
-    return SUCCESS;
+    /* Reset mac function */
+    toWrite = ioread32(workReg) | MAC_RST_BIT;
+    iowrite32(toWrite, workReg);
+    while((ioread32(workReg) & MAC_RST_BIT) != 0);
+
+    /* Disable all interrupts */
+    workReg = HWREG(hwAddr, IMC_OFFSET);
+    iowrite32(DISABLE_INTS, workReg);
+
+    /* Set GCR bit 22 as requested by init sequence in datasheet on page 53 */
+    workReg = HWREG(hwAddr, GCR_OFFSET);
+    toWrite = ioread32(workReg) | GCR_INIT; 
+    iowrite32(toWrite, workReg);
+
+    /* Set GCR2 bit 1. Said in datasheet in register information, cant find it
+     * requesting the bit in chapter 4 of datasheet on initialization. */
+    workReg = HWREG(hwAddr, GCR2_OFFSET);
+    toWrite = ioread32(workReg) | GCR2_INIT; 
+    iowrite32(toWrite, workReg);
+
+    /* PHY setup */
+    workReg = HWREG(hwAddr, MDIC_OFFSET);
+    iowrite32(PHY_INIT, workReg);
+
+    gbe38v_init_rx_reg(myDev);
+
+    /* set promiscuous mode, enable recieve */
+    workReg = HWREG(hwAddr, RXDCTL_OFFSET);
+    toWrite = ioread32(workReg) | RXCTL_INIT;
+    iowrite32(toWrite, workReg);
+
+    /* Disable all interrupts */
+    workReg = HWREG(hwAddr, IMC_OFFSET);
+    iowrite32(DISABLE_INTS, workReg);
 }
 
 static int myDev_init(struct gbe38v_dev *myDev)
 {
     int err;
 
-    /* TODO: Should i be doing this in all my functions? Its not an API so maybe not?
+    /* TODO: Should i be doing this in all my functions? Its not an API so 
+     * maybe not?
      * obviously myDev will be passed in, but it could prevent a kernel panic
      * for someone altering my code....?
      * 
@@ -407,9 +485,6 @@ int gbe38v_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
         goto ioremap_fail;
     }
 
-    /* software reset, effects load NVM and datapath */
-    iowrite32(RST_BIT, (myDev->hwAddr)+DEVCTL_OFFSET);
-    while((ioread32((myDev->hwAddr) + DEVCTL_OFFSET) & RST_BIT) != 0);
 
     /* set up dma */
     err = gbe38v_setup_dma(myDev);
@@ -418,8 +493,10 @@ int gbe38v_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
         goto dma_setup_fail;
     }
 
+    init_device_reg(myDev); /* TODO: Error checking depending on the funct */
+
     /* set up interupt handler */
-    err = gbe38v_setup_interrupts(pdev)
+    err = gbe38v_setup_interrupts(myDev);
     if(err){
         /* TODO: print statment */
         goto int_setup_fail;
