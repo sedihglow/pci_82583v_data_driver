@@ -64,11 +64,11 @@ int gbe38v_init_led_timer(void __iomem *ledCtlReg, struct gbe38v_timer *ledTimer
 
     /* if param gets set to 0, do not blink, do not start timer. */
     if(unlikely(blinkRate_g == 0)){
-        printk(KERN_WARNING "pciLED: Blink rate has been set to 0, no blink\n");
+        printk(KERN_WARNING "pciDev: Blink rate has been set to 0, no blink\n");
         return SUCCESS;
     }
     else if(unlikely(blinkRate_g < 0)){
-        printk(KERN_WARNING "pciLED: Blink rate paramater changed to negetive,"
+        printk(KERN_WARNING "pciDev: Blink rate paramater changed to negetive,"
                "Invalid parameter.\n");
         return -EINVAL;
     }
@@ -93,4 +93,5 @@ void gbe38v_set_timer_blink_rate(int blinkRate)
     blinkRate_g = blinkRate;
 }/* end gbe38v_set_timer_blink_rate */
 
+MODULE_LICENSE("GPL");
 /************** EOF ***************/

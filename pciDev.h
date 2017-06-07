@@ -26,8 +26,6 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 
-#include "ledTimer.h"
-
                   /* kmalloc allocation macros */
 #define VZALLOC(type)            ((type*)vzalloc(sizeof(type))
 #define VZALLOC_VOID(size)       ((void*)vzalloc(size)
@@ -47,20 +45,25 @@
 
 /* LED ctrl offset */
 #define LED_OFFSET 0xE00 /* LED control register */
+#define INV_BIT    0x00000040
 /* led numbers */
-#define RIGHT_GRN 0x1 /* right green is LED0 */
-#define LEFT_GRN  0x2 /* left green is LED1 */
+#define RIGHT_GRN  0x1 /* right green is LED1 */
+#define LEFT_GRN   0x2 /* left green is LED2 */
+#define LEFT_AMBER 0x4 /* left amber is LED1 */
 /* led ctrl mode values */
-#define LED_ON     0x4E   /* includes changing polarity bit */
+#define LED_ON     0xE /* always asserted */
 #define LED_OFF    0xF
+#define DISABLE_LEDS 0xF0F0F
 /* led mode locations: regVal |= (LED_MODE_ON << LEFT_AMBER_SHIFT) */
-#define RIGHT_GRN_SHIFT 0 /* LED0 */
-#define LEFT_GRN_SHIFT  8 /* LED1 */
+#define RIGHT_GRN_SHIFT  8  /* LED0 */
+#define LEFT_GRN_SHIFT   16  /* LED1 */
+#define LEFT_AMBER_SHIFT 0 /* LED2 */
+#define CLEAR_MODE(shift) (0xFFFFFFFF^(0xF<<(shift)))
 
 /* device Control Register */
 #define DEVCTL_OFFSET 0x0   
 #define PHY_RST_BIT   0x80000000 /* PHY_RST bit */
-#define MAC_RST_BIT   0x4000000  /* RST bit */
+#define MAC_RST_BIT   0x4000000  /* RST bit 27 */
 
 /* Medium Dependant Interface Port Register */
 #define MDIC_OFFSET 0x20 /* MDI control register */
@@ -79,16 +82,20 @@
 #define ICS_OFFSET   0xC8       /* Interrupt Cause Set  */
 #define IMS_OFFSET   0xD0       /* Interrupt Mask Set/Read */
 #define IMC_OFFSET   0xD8       /* Interrupt Mask Clear Regiser */
-#define LSC          0x2        /* Link Status Change bit 2 */
+#define LSC          0x4        /* Link Status Change bit 2 */
 #define RXQ0         0x100000   /* Receive Queue 0 interrupt bit 20 */
-#define DISABLE_INTS 0xFFFFFFFF /* Mask for IMC to disable all interrupts */
+#define RXT          0x80       /* receiver timer interrupt */
+#define RXO          0x40       /* receiver overrun */
+#define RXDMT        0x10       /* receive desc min threshold hit */
+#define INT_MASK     0x100004 //(LSC | RXO| RXQ0 | RXDMT)
+#define DISABLE_INTS 0x15382D7 /* Mask for IMC to disable all interrupts */
 
 /* Receive Control Register offset */
 #define RXCTL_OFFSET 0x100 
-#define RX_EN       0x2    /* RCTL enable bit */
-#define RX_UNI_P    0x8    /* unicast promiscuous bit */
-#define RX_MULTI_P  0x10   /* multicast promiscuous bit */
-#define RX_BAM      0x8000 /* Breadcast Accept mode bit */
+#define RX_EN        0x2    /* RCTL enable bit */
+#define RX_UNI_P     0x8    /* unicast promiscuous bit */
+#define RX_MULTI_P   0x10   /* multicast promiscuous bit */
+#define RX_BAM       0x8000 /* Breadcast Accept mode bit */
 #define RXCTL_INIT (RX_EN | RX_UNI_P | RX_BAM | RX_MULTI_P)
 
 /* Receive Descriptor control */
@@ -99,7 +106,7 @@
 
 /* Receive descriptor length reg */
 #define RDLEN_OFFSET 0x2808
-#define RDL_LEN (sizeof(struct gbe38v_rx_desc)*DESC_CNT)
+#define RDL_LEN   256  //(sizeof(struct gbe38v_rx_desc)*DESC_CNT)
 #define RDL_SHIFT 7
 #define RDL_SET(toSet) ((toSet)<<(RDL_SHIFT))
 
@@ -111,7 +118,11 @@
 #define RX_HEAD_OFFSET 0x2818
 #define HEAD_INIT      0x0
 #define RX_TAIL_OFFSET 0x2810
-#define TAIL_INIT      16
+#define TAIL_INIT      15
+/* status register */
+#define STAT_OFFSET 0x8
+
+#define FLUSH(myDev) (ioread32((myDev->hwAddr+STAT_OFFSET)))
                     /* general definitions */
 #define SUCCESS 0
 #define FAILURE -1
@@ -128,14 +139,11 @@
 
 /* gets the descriptor from void *desc. 
  * Ring, Desc num, struct type */
-#define GBE38V_DESC_BUFF(R, i, type)                                           \
-    (((struct type *)((R)->descBuff)) + (i))
-#define GBE38V_DESC_RING(R, i, type)                                           \
+#define GBE38V_DESC(R, i, type)                                                \
     (((struct type *)((R)->desc)) + (i))
 
-#define ONE_PAGE    4096              /* Page size of system */
-
-#define WQ_SLEEP    500 /* miliseconds, 0.5seconds */
+#define ONE_PAGE    4096 /* Page size of system */
+#define WQ_SLEEP    500  /* miliseconds, 0.5seconds */
 
 /* rx legacy descriptor */
 struct gbe38v_rx_desc{
@@ -168,7 +176,6 @@ struct gbe38v_buffer{
 struct gbe38v_ring{
 	struct gbe38v_dev *myDev;	/* back pointer to adapter */
 	void *desc;			        /* pointer to ring memory  */
-    void *descBuff[DESC_CNT];   /* buffer address's for desc */
 	dma_addr_t dma;			    /* phys address of ring    */
 	unsigned int size;		    /* length of ring in bytes */
 	unsigned int count;		    /* number of desc. in ring */
@@ -195,8 +202,6 @@ struct gbe38v_dev{
     dma_addr_t rxdma; /* physical address of rxRing */
 
     struct work_struct workq;
-
-    struct gbe38v_timer ledTimer;
 };
 
                 /* Function prototypes */
