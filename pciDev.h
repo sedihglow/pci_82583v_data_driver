@@ -62,6 +62,7 @@
 
 /* device Control Register */
 #define DEVCTL_OFFSET 0x0   
+#define SLU_BIT		  0x40
 #define PHY_RST_BIT   0x80000000 /* PHY_RST bit */
 #define MAC_RST_BIT   0x4000000  /* RST bit 27 */
 
@@ -87,8 +88,9 @@
 #define RXT          0x80       /* receiver timer interrupt */
 #define RXO          0x40       /* receiver overrun */
 #define RXDMT        0x10       /* receive desc min threshold hit */
-#define INT_MASK     0x100004 //(LSC | RXO| RXQ0 | RXDMT)
-#define DISABLE_INTS 0x15382D7 /* Mask for IMC to disable all interrupts */
+#define INT_ASSERTED 0x80000000 /* Shows device asserted the interrupt */
+#define INT_MASK     0x100004 //0x011000D4 //(LSC | RXO| RXQ0 | RXDMT) 0x100004  
+#define DISABLE_INTS 0xFFFFFFFF//0x15382D7 /* Mask for IMC to disable all interrupts */
 
 /* Receive Control Register offset */
 #define RXCTL_OFFSET 0x100 
@@ -99,10 +101,10 @@
 #define RXCTL_INIT (RX_EN | RX_UNI_P | RX_BAM | RX_MULTI_P)
 
 /* Receive Descriptor control */
-#define RXDCTL_OFFSET 0x2828
-#define WTHRESH_SHIFT 16
-#define RXD_WTHRESH_MASK(toSet) ((toSet)<<(WTHRESH_SHIFT))
-#define RXD_GRAIN 0x1000000     /* descriptor grainulatiry bit 24 */
+//#define RXDCTL_OFFSET 0x2828
+//#define WTHRESH_SHIFT 16
+//#define RXD_WTHRESH_MASK(toSet) ((toSet)<<(WTHRESH_SHIFT))
+//#define RXD_GRAIN 0x1000000     /* descriptor grainulatiry bit 24 */
 
 /* Receive descriptor length reg */
 #define RDLEN_OFFSET 0x2808
@@ -115,10 +117,10 @@
 #define RDBAL_OFFSET 0x2800 /* Base Address Low bits */
 
 /* Head and Tail of Rx descriptor ring */
-#define RX_HEAD_OFFSET 0x2818
+#define RX_HEAD_OFFSET 0x2810
 #define HEAD_INIT      0x0
-#define RX_TAIL_OFFSET 0x2810
-#define TAIL_INIT      15
+#define RX_TAIL_OFFSET 0x2818
+#define TAIL_INIT      15//(DESC_CNT-1)
 /* status register */
 #define STAT_OFFSET 0x8
 
@@ -140,7 +142,8 @@
 /* gets the descriptor from void *desc. 
  * Ring, Desc num, struct type */
 #define GBE38V_DESC(R, i, type)                                                \
-    (((struct type *)((R)->desc)) + (i))
+    (&(((struct type *)((R)->desc))[i]))
+#define DD_BIT 0x1
 
 #define ONE_PAGE    4096 /* Page size of system */
 #define WQ_SLEEP    500  /* miliseconds, 0.5seconds */
@@ -180,7 +183,6 @@ struct gbe38v_ring{
 	unsigned int size;		    /* length of ring in bytes */
 	unsigned int count;		    /* number of desc. in ring */
 
-	u16 useNext;                /* next descriptor to use */
 	u16 cleanNext;              /* next used descriptor to clean */
 
 	void __iomem *head;         /* (NAME) head register adderess */
@@ -199,7 +201,6 @@ struct gbe38v_dev{
     struct pci_dev *pdev;
 
     struct gbe38v_ring *rxRing;
-    dma_addr_t rxdma; /* physical address of rxRing */
 
     struct work_struct workq;
 };

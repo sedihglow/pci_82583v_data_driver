@@ -1,1 +1,0 @@
-cmd_/home/linux/usb/pci_data_driver/pciDev.ko := ld -r -m elf_x86_64 -T /usr/src/linux-headers-3.13.0-49-generic/scripts/module-common.lds --build-id  -o /home/linux/usb/pci_data_driver/pciDev.ko /home/linux/usb/pci_data_driver/pciDev.o /home/linux/usb/pci_data_driver/pciDev.mod.o
